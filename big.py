@@ -1,8 +1,9 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 import sys
 from struct import unpack_from as upf
 import refpack
+import argparse
 
 class big_file:
     def __init__(self, filename):
@@ -32,7 +33,7 @@ class big_file:
 
             if entry_name in self.entry_table:
                 print("Dup entries! REEEEEEEEEEEE!")
-                print("Dup entries: ", entry_name)
+                print("Dup entry: ", entry_name)
                 exit(1)
             entry_name = entry_name.decode("ascii")
             self.entry_table[entry_name] = self.data[entry_off:entry_off+entry_size]
@@ -45,23 +46,32 @@ class big_file:
         for name in self.entry_table.keys():
             print("File:\n    Name: ", name, "\n    Length: ", len(self.entry_table[name]), "\n")
 
-    def get_file(self, filename):
-        try:
-            out_data = refpack.decompress(self.entry_table[filename])
-        except refpack.NotRefpackedError as e:
-            print(self.entry_table[filename])
-            raise e
+    def get_file(self, filename, auto_decompress=True):
+        out_data = self.entry_table[filename]
+        if auto_decompress and refpack.is_refpacked(out_data):
+            out_data = refpack.decompress(out_data)
         return out_data
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2 or len(sys.argv) > 4:
-        print("Usage: big.py filename")
-        exit(1)
-    big = big_file(sys.argv[1])
-    if len(sys.argv)==2:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("big_file", 
+            help="name of .big file to parse")
+    parser.add_argument("inner_file", nargs='?', 
+            help="name of file to extract", default='')
+    parser.add_argument("output_file", nargs='?', 
+            help="name of output file", default='')
+    parser.add_argument("--no-decompress", dest='no_decompress', help="Don't automatically decompress", action='store_true')
+    args = parser.parse_args()
+    big = big_file(args.big_file)
+    if args.inner_file == '':
         big.dump_files()
-    elif len(sys.argv)==3:
-        print(big.get_file(sys.argv[2]))
-    else:
-        open(sys.argv[3], "wb").write(big.get_file(sys.argv[2]))
+    else: 
+        if args.no_decompress:
+            out_data = big.get_file(args.inner_file, False)
+        else:
+            out_data = big.get_file(args.inner_file)
+        if args.output_file == '':
+            print(out_data)
+        else:
+            open(args.output_file, "wb").write(out_data)

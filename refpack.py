@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 
 import sys
+from cffi import FFI
+from os.path import dirname
+
+ffi = FFI()
+ffi.cdef("""
+    typedef unsigned char u8;
+    typedef unsigned long long u64;
+    typedef struct {
+        u8 * data;
+        u64 len;
+    } OutVec;
+
+    OutVec decompress(const u8 *, u64 len);
+    OutVec compress(const u8 *, u64 len);
+    void free_outvec(OutVec);
+""")
+libsage = ffi.dlopen(dirname(__file__) + "/refpack/target/debug/librefpack.so")
 
 class NotRefpackedError(ValueError):
     def __init__(self, value):
@@ -8,75 +25,33 @@ class NotRefpackedError(ValueError):
     def __str__(self):
         return repr(self.parameter)
 
+class RefunpackError(Exception):
+    def __init__(self, value):
+        self.parameter = value
+    def __str__(self):
+        return repr(self.parameter)
+
+def is_refpacked(data):
+    return (data[1] == 0xfb and data[0] & 0x3e == 0x10)
+
 def decompress(data):
     """
     decompress data using the refpack algorithm
     raises NotRefpackedError if data is detected to not be refpacked
     """
-    if data[1] != 0xfb or data[0] & 0x3e != 0x10:
+    if not is_refpacked(data):
         raise NotRefpackedError("Expected refpacked data, invalid header")
-    # parse flags
-    flags = {}
-    flags['L'] = data[0] >> 7
-    flags['U'] = data[0] >> 6 & 1
-    flags['C'] = data[0]      & 1
-    flen = 4 if flags['L'] else 3
-    pos = 2
-    stop = False
     outbuf = b''
 
-    # parse de/compressed size fields
-    if flags['C']:
-        compressed_size = data[pos:pos + flen]
-        pos += flen
-    decompressed_size = data[pos:pos + flen]
-    pos += flen
+    cdata = ffi.new("u8[]", data)
+    out_vec = libsage.decompress(cdata, len(data))
+    if out_vec.data == ffi.NULL:
+        libsage.free_outvec(out_vec)
+        raise RefunpackError("Failed to decompress")
 
-    # decompress
-    while not stop:
-        com = data[pos] >> 5
-        if com < 4:
-            #print("2 byte command")
-            plen =   (data[pos] & 0x03)     
-            rlen =  ((data[pos] & 0x1C) >> 2) + 3
-            rdist = ((data[pos] & 0x60) << 3) + data[pos+1] + 1
-            pos += 2
-        elif com < 6:
-            #print("3 byte command")
-            plen =  ((data[pos+1] & 0xC0) >> 6)
-            rlen =  ((data[  pos] & 0x3F)  + 4)
-            rdist = ((data[pos+1] & 0x3F) << 8) + data[pos+2] + 1
-            pos += 3
-        elif com == 6:
-            #print("4 byte command")
-            plen  =  (data[pos] & 0x03)
-            rlen  = ((data[pos] & 0x0C) <<  6) + data[pos+3] + 5
-            rdist = ((data[pos] & 0x10) << 12) + (data[pos+1] << 8) + data[pos+2] + 1
-            pos += 4
-        elif com == 7:
-            if data[pos] >= 0xfc:
-                #print("stop command")
-                plen = data[pos] & 0x03
-                stop = True
-            else:
-                #print("1 byte command")
-                plen = ((data[pos] & 0x1F) + 1) << 2
-                pass
-            rlen = 0
-            rdist = 0
-            pos += 1
+    outbuf = bytes(out_vec.data[0:out_vec.len])
 
-        #print(plen, rlen, rdist)
-        outbuf += data[pos:pos+plen]
-        pos += plen
-        if rlen > 0:
-            seg = outbuf[-rdist:]
-            while len(seg) < rlen:
-                outbuf += seg
-                rlen -= len(seg)
-            outbuf += seg[:rlen]
-        #print(outbuf)
-        #input()
+    libsage.free_outvec(out_vec)
     return outbuf
 
 #TODO: make this actually compress, instead of serializing
@@ -84,6 +59,7 @@ def compress(data):
     """
     compress data using the refpack algorithm
     """
+    # 4 byte length field
     outbuf = b'\x90\xfb'
     decompressed_size = len(data).to_bytes(4, byteorder='big')
     outbuf += decompressed_size
